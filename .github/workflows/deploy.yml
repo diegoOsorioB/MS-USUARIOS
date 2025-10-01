@@ -1,0 +1,128 @@
+name: Deploy Microservice
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  # Nombre del servicio que estás desplegando, por ejemplo "paquetes"
+  SERVICE_NAME: "usuarios"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Build application
+        run: mvn clean package -DskipTests
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_DNS }} >> ~/.ssh/known_hosts
+
+      - name: Create Directory on EC2
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_DNS }} "
+            mkdir -p /home/ec2-user/$SERVICE_NAME
+            echo '✅ Directory /home/ec2-user/$SERVICE_NAME created'
+          "
+
+      - name: Upload JAR
+        run: |
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no target/*.jar ec2-user@${{ secrets.EC2_DNS }}:/home/ec2-user/$SERVICE_NAME/
+          echo "✅ JAR uploaded successfully"
+
+      - name: Deploy Application
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_DNS }} "
+            set -x
+
+            # Cargar variables de entorno
+            source /home/ec2-user/env_services.sh
+
+            cd /home/ec2-user/$SERVICE_NAME
+
+            # Determinar el puerto dinámicamente según el nombre del servicio
+            SERVICE_PORT=\$(eval echo \$SERVER_PORT_${SERVICE_NAME^^})
+
+            echo '1. Checking current processes on port $SERVICE_PORT...'
+            PORT_PID=\$(lsof -ti:\$SERVICE_PORT 2>/dev/null || echo '')
+            if [ ! -z \"\$PORT_PID\" ]; then
+              echo \"Found process \$PORT_PID on port \$SERVICE_PORT - stopping it...\"
+              kill -9 \$PORT_PID
+              sleep 3
+            else
+              echo 'No process found on port $SERVICE_PORT'
+            fi
+
+            echo '2. Starting application...'
+            nohup java -jar *.jar \
+              --server.port=\$SERVICE_PORT \
+              --server.address=0.0.0.0 \
+              --spring.datasource.url=\$DB_URL \
+              --spring.datasource.username=\$DB_USERNAME \
+              --spring.datasource.password=\$DB_PASSWORD \
+              > app.log 2>&1 &
+
+            APP_PID=\$!
+            echo \"Application started with PID: \$APP_PID\"
+
+            echo '3. Waiting for startup...'
+            sleep 15
+
+            echo '4. Checking if application is running...'
+            if ps -p \$APP_PID > /dev/null; then
+              echo '✅ Application process is running'
+            else
+              echo '❌ Application process died'
+              echo 'Application logs:'
+              cat app.log
+              exit 1
+            fi
+
+            echo '5. Checking port...'
+            if ss -tuln | grep -q \":\$SERVICE_PORT\"; then
+              echo '✅ Port \$SERVICE_PORT is listening'
+              echo '🎉 Deployment successful!'
+            else
+              echo '❌ Port \$SERVICE_PORT is not listening'
+              echo 'Application logs:'
+              cat app.log
+              exit 1
+            fi
+
+            set +x
+          "
+
+      - name: Final Verification
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_DNS }} "
+            echo '--- Deployment Status ---'
+            echo 'Service: $SERVICE_NAME'
+            echo 'Port: \$SERVICE_PORT'
+            echo ''
+            echo 'Directory contents:'
+            ls -la /home/ec2-user/$SERVICE_NAME/
+            echo ''
+            echo 'Processes:'
+            ps aux | grep 'java.*$SERVICE_NAME' | grep -v grep || echo 'No specific service processes'
+            echo ''
+            echo 'Port status:'
+            ss -tuln | grep \":\$SERVICE_PORT\" && echo '✅ Port listening' || echo '❌ Port not listening'
+            echo ''
+            echo 'Application logs (last 5 lines):'
+            tail -5 /home/ec2-user/$SERVICE_NAME/app.log || echo 'No logs available'
+          "
