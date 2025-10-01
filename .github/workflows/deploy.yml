@@ -1,11 +1,10 @@
-name: Deploy Microservice
+name: Deploy Usuarios Service
 
 on:
   push:
     branches: [ main ]
 
 env:
-  # Nombre del servicio que estás desplegando, por ejemplo "paquetes"
   SERVICE_NAME: "usuarios"
 
 jobs:
@@ -32,7 +31,6 @@ jobs:
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.EC2_DNS }} >> ~/.ssh/known_hosts
-      
 
       - name: Create Directory on EC2
         run: |
@@ -59,46 +57,48 @@ jobs:
             # Determinar el puerto dinámicamente según el nombre del servicio
             SERVICE_PORT=\$(eval echo \$SERVER_PORT_${SERVICE_NAME^^})
 
-            echo \"1. Checking current processes on port \$SERVICE_PORT...\"
+            echo '1. Checking current processes on port $SERVICE_PORT...'
             PORT_PID=\$(lsof -ti:\$SERVICE_PORT 2>/dev/null || echo '')
             if [ ! -z \"\$PORT_PID\" ]; then
-              echo \"Found process \$PORT_PID on port \$SERVICE_PORT - stopping it...\"
+              echo \"Found process \$PORT_PID on port $SERVICE_PORT - stopping it...\"
               kill -9 \$PORT_PID
               sleep 3
             else
-              echo \"No process found on port \$SERVICE_PORT\"
+              echo 'No process found on port $SERVICE_PORT'
             fi
 
-            echo \"2. Starting application...\"
+            echo '2. Starting application...'
             nohup java -jar *.jar \
               --server.port=\$SERVICE_PORT \
               --server.address=0.0.0.0 \
-              --spring.datasource.url=\$DB_URL \
-              --spring.datasource.username=\$DB_USERNAME \
-              --spring.datasource.password=\$DB_PASSWORD \
+              --spring.datasource.url=\"\$DB_URL\" \
+              --spring.datasource.username=\"\$DB_USERNAME\" \
+              --spring.datasource.password=\"\$DB_PASSWORD\" \
               > app.log 2>&1 &
 
             APP_PID=\$!
             echo \"Application started with PID: \$APP_PID\"
 
-            echo \"3. Waiting for startup...\"
+            echo '3. Waiting for startup...'
             sleep 15
 
-            echo \"4. Checking if application is running...\"
+            echo '4. Checking if application is running...'
             if ps -p \$APP_PID > /dev/null; then
               echo '✅ Application process is running'
             else
               echo '❌ Application process died'
+              echo 'Application logs:'
               cat app.log
               exit 1
             fi
 
-            echo \"5. Checking port...\"
+            echo '5. Checking port...'
             if ss -tuln | grep -q \":\$SERVICE_PORT\"; then
-              echo \"✅ Port \$SERVICE_PORT is listening\"
+              echo '✅ Port \$SERVICE_PORT is listening'
               echo '🎉 Deployment successful!'
             else
-              echo \"❌ Port \$SERVICE_PORT is not listening\"
+              echo '❌ Port \$SERVICE_PORT is not listening'
+              echo 'Application logs:'
               cat app.log
               exit 1
             fi
@@ -111,7 +111,6 @@ jobs:
           ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_DNS }} "
             echo '--- Deployment Status ---'
             echo 'Service: $SERVICE_NAME'
-            SERVICE_PORT=\$(eval echo \$SERVER_PORT_${SERVICE_NAME^^})
             echo 'Port: \$SERVICE_PORT'
             echo ''
             echo 'Directory contents:'
